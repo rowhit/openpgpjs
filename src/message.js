@@ -154,10 +154,14 @@ Message.prototype.decryptSessionKeys = function(privateKeys, passwords) {
         throw new Error('No symmetrically encrypted session key packet found.');
       }
       await Promise.all(symESKeyPacketlist.map(async function(packet) {
-        try {
-          await packet.decrypt(password);
-          keyPackets.push(packet);
-        } catch (err) {}
+        for (var i = 0; i < passwords.length; i++) {
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            await packet.decrypt(passwords[i]);
+            keyPackets.push(packet);
+            break;
+          } catch (err) {}
+        }
       }));
 
     } else if (privateKeys) {
@@ -165,16 +169,29 @@ Message.prototype.decryptSessionKeys = function(privateKeys, passwords) {
       if (!pkESKeyPacketlist) {
         throw new Error('No public key encrypted session key packet found.');
       }
-      var privateKeyPacket = privateKey.getKeyPacket(this.getEncryptionKeyIds());
-      if (!privateKeyPacket.isDecrypted) {
-        throw new Error('Private key is not decrypted.');
-      }
       await Promise.all(pkESKeyPacketlist.map(async function(packet) {
-        if (packet.publicKeyId.equals(privateKeyPacket.getKeyId())) {
-          try {
-            await packet.decrypt(privateKeyPacket);
-            keyPackets.push(packet);
-          } catch (err) {}
+        var packetKeyId = packet.publicKeyId;
+        for (var i = 0; i < privateKeys.length; i++){
+          var privateKeyPackets;
+          var found = false;
+          if (packetKeyId.bytes === '0') {
+            // wildcard key ID - try all key packets
+            privateKeyPackets = privateKeyPackets.getAllKeyPackets();
+          } else {
+            privateKeyPackets = [privateKeys[i].getKeyPacket([packetKeyId])];
+          }
+          for (var j = 0; j < privateKeyPackets.length; j++) {
+            var privateKeyPacket = privateKeyPackets[j];
+            if (!privateKeyPacket.isDecrypted) {
+              throw new Error('Private key is not decrypted.');
+            }
+            try {
+              // eslint-disable-next-line no-await-in-loop
+              await packet.decrypt(privateKeyPacket);
+              keyPackets.push(packet);
+              break;
+            } catch (err) {}
+          }
         }
       }));
     } else {
@@ -242,7 +259,7 @@ Message.prototype.getText = function() {
  * @param  {Object} sessionKey         (optional) session key in the form: { data:Uint8Array, algorithm:String }
  * @return {Message}                   new message with encrypted content
  */
-Message.prototype.encrypt = function(keys, passwords, sessionKey) {
+Message.prototype.encrypt = function(keys, passwords, sessionKey, useWildcard) {
   let symAlgo, msg, symEncryptedPacket;
   return Promise.resolve().then(async () => {
     if (sessionKey) {
@@ -263,7 +280,7 @@ Message.prototype.encrypt = function(keys, passwords, sessionKey) {
       sessionKey = crypto.generateSessionKey(symAlgo);
     }
 
-    msg = await encryptSessionKey(sessionKey, symAlgo, keys, passwords);
+    msg = await encryptSessionKey(sessionKey, symAlgo, keys, passwords, useWildcard);
 
     if (config.aead_protect) {
       symEncryptedPacket = new packet.SymEncryptedAEADProtected();
@@ -297,7 +314,7 @@ Message.prototype.encrypt = function(keys, passwords, sessionKey) {
  * @param  {Array<String>} passwords   (optional) for message encryption
  * @return {Message}                   new message with encrypted content
  */
-export function encryptSessionKey(sessionKey, symAlgo, publicKeys, passwords) {
+export function encryptSessionKey(sessionKey, symAlgo, publicKeys, passwords, useWildcard) {
   var results, packetlist = new packet.List();
 
   return Promise.resolve().then(async () => {
@@ -309,7 +326,11 @@ export function encryptSessionKey(sessionKey, symAlgo, publicKeys, passwords) {
           throw new Error('Could not find valid key packet for encryption in key ' + key.primaryKey.getKeyId().toHex());
         }
         var pkESKeyPacket = new packet.PublicKeyEncryptedSessionKey();
-        pkESKeyPacket.publicKeyId = encryptionKeyPacket.getKeyId();
+        if (!useWildcard) {
+          pkESKeyPacket.publicKeyId = encryptionKeyPacket.getKeyId();
+        } else {
+          pkESKeyPacket.publicKeyId = '0';
+        }
         pkESKeyPacket.publicKeyAlgorithm = encryptionKeyPacket.algorithm;
         pkESKeyPacket.sessionKey = sessionKey;
         pkESKeyPacket.sessionKeyAlgorithm = symAlgo;
